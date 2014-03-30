@@ -47,6 +47,7 @@ static const NSString *PlayerItemStatusContext;
 @property NSDate *lastPaused;
 @property BOOL isUsingWifi;
 @property MPMediaItemArtwork *artwork;
+@property NSTimer *statusTimer;
 
 @end
 
@@ -65,8 +66,7 @@ static const NSString *PlayerItemStatusContext;
     
     [playButton setEnabled:NO];
     
-    self.titleLabel.text = @"";
-    self.artistLabel.text = @"";
+    [self updateStatusWithTitle:@"Loading..." artist:@"GDM Radio"];
     
     self.mpVolumeViewParentView.backgroundColor = [UIColor clearColor];
     MPVolumeView *mpVolumeView = [[MPVolumeView alloc] initWithFrame:self.mpVolumeViewParentView.bounds];
@@ -105,8 +105,11 @@ static const NSString *PlayerItemStatusContext;
 
 - (void)didReceiveMemoryWarning
 {
+    if (!self.isPlaying) {
+        [self resetPlayer];
+    }
+    
     [super didReceiveMemoryWarning];
-    // Dispose of any resources that can be recreated.
 }
 
 - (IBAction)togglePlay:(id)sender {
@@ -141,16 +144,20 @@ static const NSString *PlayerItemStatusContext;
         self.shouldAutoplay = YES;
     }
     [self pause];
-    [self disablePlay];
+    [self.asset cancelLoading];
     self.player = nil;
     self.playerItem = nil;
     self.asset = nil;
+    [self.statusTimer invalidate];
+    self.statusTimer = nil;
 }
 
 - (void)prepareToPlay {
     if (self.playerItem) {
         return;
     }
+    
+    [self updateStatusWithTitle:@"Loading..." artist:@"GDM Radio"];
     
     NSLog(@"%@", @"Preparing player.");
     
@@ -168,9 +175,6 @@ static const NSString *PlayerItemStatusContext;
     
     self.player = [AVPlayer playerWithPlayerItem:self.playerItem];
     self.player.allowsExternalPlayback = NO;
-    
-    [self getStatus:nil];
-    [NSTimer scheduledTimerWithTimeInterval:5.0 target:self selector:@selector(getStatus:) userInfo:nil repeats:YES];
 }
 
 - (void)addItemEndObserverForPlayerItem:(AVPlayerItem *)playerItem {
@@ -193,6 +197,10 @@ static const NSString *PlayerItemStatusContext;
                 [[UIApplication sharedApplication] setNetworkActivityIndicatorVisible:NO];
                 [self enablePlay];
                 NSLog(@"%@", @"Player ready.");
+                
+                [self getStatus:nil];
+                self.statusTimer = [NSTimer scheduledTimerWithTimeInterval:5.0 target:self selector:@selector(getStatus:) userInfo:nil repeats:YES];
+                
                 if (self.shouldAutoplay && [self.lastPaused timeIntervalSinceNow] > -60) { // Don't autoplay if it's been more than 1 minute
                     NSLog(@"Autoplaying after %.2f seconds", -[self.lastPaused timeIntervalSinceNow]);
                     [self play];
@@ -224,6 +232,8 @@ static const NSString *PlayerItemStatusContext;
     self.isPlaying = NO;
     self.playButton.selected = NO;
     self.lastPaused = [NSDate date];
+    
+    [NSTimer scheduledTimerWithTimeInterval:30.0 target:self selector:@selector(stop) userInfo:nil repeats:NO];
 }
 
 - (void) stop {
@@ -235,7 +245,13 @@ static const NSString *PlayerItemStatusContext;
 }
 
 - (void) play {
-    // In a later version, should either skip to end on play or keep title in sync with pauses
+    if (!self.playerItem) {
+        self.shouldAutoplay = true;
+        self.lastPaused = [NSDate date];
+        [self prepareToPlay];
+        return;
+    }
+    
     NSLog(@"Starting playback at %lld.", self.playerItem.currentTime.value);
     [self.player play];
     self.isPlaying = YES;
@@ -262,31 +278,28 @@ static const NSString *PlayerItemStatusContext;
     NSError *error = nil;
     id jsonObject = [NSJSONSerialization JSONObjectWithData:data options:NSJSONReadingAllowFragments error:&error];
     if (jsonObject != nil && error == nil) {
-        NSString *title = [jsonObject valueForKey:@"current_file_title"];
-        NSMutableString *artist = [[NSMutableString alloc]initWithString:[jsonObject valueForKey:@"current_file_artist"]];
-        
-        if (title != nil) {
-            self.titleLabel.text = title;
-        } else {
-            self.titleLabel.text = @"GDM Radio";
+        NSString *title;
+        NSMutableString *artist;
+        @try {
+            title = [jsonObject valueForKey:@"current_file_title"];
+            artist = [[NSMutableString alloc]initWithString:[jsonObject valueForKey:@"current_file_artist"]];
+        }
+        @catch (NSException *exception) {
+            title = @"GDM Radio";
+            artist = [[NSMutableString alloc]initWithString:@"GDM Radio"];
         }
         
-        if (artist != nil) {
-            self.artistLabel.text = artist;
-        } else {
-            self.artistLabel.text = @"GDM Radio";
+        if (title == nil) {
+            title = @"GDM Radio";
+        }
+        
+        if (artist == nil) {
+            artist = [[NSMutableString alloc]initWithString:@"GDM Radio"];
         }
         
         [artist appendString:@" - GDM Radio"];
         
-        Class playingInfoCenter = NSClassFromString(@"MPNowPlayingInfoCenter");
-        
-        if (playingInfoCenter) {
-            MPNowPlayingInfoCenter *center = [MPNowPlayingInfoCenter defaultCenter];
-            NSDictionary *songInfo = [NSDictionary dictionaryWithObjectsAndKeys:artist, MPMediaItemPropertyArtist, title, MPMediaItemPropertyTitle, self.artwork, MPMediaItemPropertyArtwork, nil];
-            center.nowPlayingInfo = songInfo;
-            
-        }
+        [self updateStatusWithTitle:title artist:artist];
     } else if (error != nil) {
         NSLog(@"Error parsing status JSON: %@", error.localizedDescription);
     } else {
@@ -313,6 +326,19 @@ static const NSString *PlayerItemStatusContext;
     }
 }
 
+- (void) updateStatusWithTitle:(NSString*)title artist:(NSString*)artist {
+    self.titleLabel.text = title;
+    self.artistLabel.text = artist;
+    
+    Class playingInfoCenter = NSClassFromString(@"MPNowPlayingInfoCenter");
+    
+    if (playingInfoCenter) {
+        MPNowPlayingInfoCenter *center = [MPNowPlayingInfoCenter defaultCenter];
+        NSDictionary *songInfo = [NSDictionary dictionaryWithObjectsAndKeys:artist, MPMediaItemPropertyArtist, title, MPMediaItemPropertyTitle, self.artwork, MPMediaItemPropertyArtwork, nil];
+        center.nowPlayingInfo = songInfo;
+    }
+}
+
 - (void) setNetworkUnreachable {
     [self resetPlayer];
     self.titleLabel.text = @"No internet connection.";
@@ -333,12 +359,12 @@ static const NSString *PlayerItemStatusContext;
             }
             case UIEventSubtypeRemoteControlPlay: {
                 NSLog(@"%@", @"Remote Control Event Received: Play.");
-                if (!self.isPlaying) [self play];
+                [self play];
                 break;
             }
             case UIEventSubtypeRemoteControlPause: {
                 NSLog(@"%@", @"Remote Control Event Received: Pause.");
-                if (self.isPlaying) [self pause];
+                [self pause];
                 break;
             }
             default: {
